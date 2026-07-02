@@ -1,8 +1,10 @@
 # Scale-Agnostic Image Quality Assessment via Magnitude-Aware Ranking
 
-**Accepted at QoMEX 2026**  
+**Presented at QoMEX 2026**  
 Adam Zizien, Karel Fliegel  
 <!-- [Paper](#) · [Pretrained Models (Release)](#) · [Dataset Scores](Evaluation_results/) -->
+
+**Try a model of your choice in your browser (no install):** https://zizieada.github.io/wphl/
 
 ---
 
@@ -12,6 +14,8 @@ This repository accompanies the paper *Scale-Agnostic Image Quality Assessment v
 
 The framework is evaluated on top of [CKDN](https://github.com/researchmm/CKDN) (the reimplementation provided in [IQA-PyTorch](https://github.com/chaofengc/IQA-PyTorch/blob/main/pyiqa/archs/ckdn_arch.py)), a knowledge-distillation-based IQA model, and the retrained weights are provided.
 
+The weights are released in three formats: PyTorch checkpoints, TorchScript traces, and ONNX exports. The two ONNX models run directly in the browser through the hosted scorer at https://zizieada.github.io/wphl/, with no Python or install, and no image leaves your machine. See [Pretrained Models](#pretrained-models) below.
+
 ---
 
 ## Repository Structure
@@ -19,6 +23,7 @@ The framework is evaluated on top of [CKDN](https://github.com/researchmm/CKDN) 
 ```
 ├── WeightedPairwiseHinge.py      # Proposed loss function (PyTorch)
 ├── train_example.py              # Minimal example: pairwise training with WPHL
+├── index.html                    # Browser-based ONNX scorer (also hosted, link above)
 ├── Evaluation_results/
 │   ├── README.md                 # Dataset disclosure and citation guidance
 │   └── *.csv                     # Subjective scores + objective metric
@@ -65,10 +70,27 @@ loss, acc = criterion(o1, o2, y1, y2, target)
 
 ## Pretrained Models
 
-Retrained CKDN weights are available in the latest release. The release contains:
+Retrained CKDN weights are available in the latest release, in three formats:
 
-- **Traced models** (`.pt`) — loadable with `torch.jit.load`, no model definition required.
-- **Best checkpoint** (`CKDN_ImageNet.pth`) — standard PyTorch checkpoint, requires the CKDN model class.
+| File | Format | Description |
+|---|---|---|
+| `CKDN_ImageNet.pth` | PyTorch checkpoint | Best-performing model. Requires the CKDN model class to load (the IQA-PyTorch variant to be precise). |
+| `*.pt` | TorchScript (traced) | Other retrained variants. Loadable with `torch.jit.load`, no model definition required. |
+| `CKDN_ImageNet.onnx` | ONNX | Best-performing model, exported for use without PyTorch. |
+| `CKDN_WPHL+.onnx` | ONNX | Variant trained with WPHL on an expanded, multi-dataset pool with a longer schedule. Included to show that the WPHL training signal continues to hold with more data, without any manual MOS alignment. |
+
+### Run in the browser (ONNX, no Python)
+
+Both `.onnx` files run client-side in any modern browser, either through the hosted page at **https://zizieada.github.io/wphl/** or by opening `iqa_scorer.html` from this repository locally. No Python, PyTorch, or install is required, and no image leaves your machine.
+
+1. **Load model** — select `CKDN_ImageNet.onnx` or `CKDN_WPHL+.onnx`.
+2. **Choose reference image** — the original / undistorted image.
+3. **Choose distorted image(s)** — one or many versions to evaluate.
+4. **Compute scores**, then **Export CSV**.
+
+Both models take two inputs `(dist, ref)` in that order and emit a single scalar score per pair. Whether a higher or lower score means "better" depends on the model's training direction. The raw outputs are not calibrated to a fixed scale, so interpret them against your own validation set.
+
+> Note: each distorted image should depict the same content as the reference, or the score is meaningless. The first browser run fetches ONNX Runtime Web from a CDN; see the comments at the bottom of `iqa_scorer.html` for fully offline use.
 
 ### Loading a Traced Model
 
