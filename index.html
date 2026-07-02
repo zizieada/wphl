@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Image Quality (IQA) Scorer</title>
+<!--
+  Full-reference IQA scorer — runs entirely in the browser.
+  No Python, no server, no install. The ONNX model runs client-side via
+  ONNX Runtime Web (WebAssembly backend).
+
+  Usage:
+    1. Open this file in any modern browser.
+       (Internet is needed the first time to fetch onnxruntime-web from the
+        CDN. To run fully offline, see the OFFLINE note at the bottom.)
+    2. Load your exported .onnx model.
+    3. Pick ONE reference image.
+    4. Pick ONE OR MORE distorted images.
+    5. Click "Compute scores" — the model scores each distorted image against
+       the reference, then you can export all results as CSV.
+
+  Preprocessing matches the trained pipeline:
+    image -> RGB -> float32 in [0,1] -> (1, 3, H, W).
+  ImageNet mean/std normalization happens inside the model.
+-->
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js"></script>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    margin: 0; padding: 24px; max-width: 900px; margin-inline: auto;
+    line-height: 1.4;
+  }
+  h1 { font-size: 1.25rem; margin: 0 0 16px; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+  .panels { display: flex; gap: 16px; flex-wrap: wrap; }
+  .panel {
+    flex: 1 1 300px; border: 1px solid #8884; border-radius: 10px; padding: 12px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .panel h2 { font-size: 0.95rem; margin: 0; }
+  .imgbox {
+    background: #0002; border-radius: 8px; min-height: 200px;
+    display: flex; align-items: center; justify-content: center; overflow: hidden;
+  }
+  .imgbox img { max-width: 100%; max-height: 320px; display: block; }
+  .imgbox span { color: #888; font-size: 0.85rem; }
+  .path { color: #888; font-size: 0.75rem; word-break: break-all; min-height: 1em; }
+  button {
+    font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid #8886;
+    background: #8881; cursor: pointer;
+  }
+  button:disabled { opacity: 0.45; cursor: default; }
+  #status { color: #888; font-size: 0.85rem; }
+  .scorebar {
+    display: flex; align-items: center; gap: 12px; margin-top: 20px;
+    padding-top: 16px; border-top: 1px solid #8884; flex-wrap: wrap;
+  }
+  label.filebtn { display: inline-block; }
+  input[type=file] { display: none; }
+  .howto {
+    border: 1px solid #8884; border-radius: 10px;
+    padding: 12px 16px; margin-bottom: 20px; background: #8881;
+  }
+  .howto summary { cursor: pointer; font-weight: 600; font-size: 0.95rem; }
+  .howto p { margin: 10px 0; }
+  .howto ol { margin: 10px 0; padding-left: 20px; }
+  .howto li { margin-bottom: 4px; }
+  .howto code { background: #8882; padding: 1px 5px; border-radius: 4px; font-size: 0.9em; }
+
+  /* distorted file list */
+  .distlist {
+    list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto;
+    font-size: 0.8rem;
+  }
+  .distlist li {
+    display: flex; justify-content: space-between; gap: 8px;
+    padding: 4px 6px; border-bottom: 1px solid #8883;
+  }
+  .distlist .fname { word-break: break-all; }
+  .distlist .sc { font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
+  .distlist .sc.err { color: #c0392b; font-weight: 400; }
+
+  /* results table */
+  #results { margin-top: 20px; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #8884; }
+  th { font-weight: 600; }
+  td.score { font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+  <h1>Image Quality (IQA) Scorer</h1>
+
+  <details class="howto" open>
+    <summary>How to use</summary>
+    <p>
+      This page measures the perceptual quality of one or more <strong>distorted</strong>
+      images relative to a single clean <strong>reference</strong> image, using a trained
+      full-reference IQA model. Everything runs in your browser — no install, and no
+      image is uploaded to any server.
+    </p>
+    <ol>
+      <li><strong>Load model</strong> — pick your exported <code>.onnx</code> model file.</li>
+      <li><strong>Choose reference image</strong> — the original / undistorted image
+        (one only; a preview is shown).</li>
+      <li><strong>Choose distorted images</strong> — select one or many at once. These
+        are the versions you want to evaluate (e.g. compressed, blurred, denoised,
+        upscaled). No previews are shown; you'll see the filenames instead.</li>
+      <li><strong>Compute scores</strong> — the model scores each distorted image against
+        the reference and fills in a results table.</li>
+      <li><strong>Export CSV</strong> — download all reference/distorted pairs and their
+        scores.</li>
+    </ol>
+    <p style="color:#888; font-size:0.85rem">
+      Notes: each distorted image must depict the same content as the reference, or the
+      score is meaningless. Whether a higher or lower score means "better" depends on how
+      your model was trained — interpret it against your own validation set.
+    </p>
+  </details>
+
+  <div class="row">
+    <label class="filebtn">
+      <button type="button" onclick="this.parentElement.querySelector('input').click()">Load model (.onnx)</button>
+      <input type="file" accept=".onnx" id="modelInput" />
+    </label>
+    <span id="modelLabel" style="color:#888">No model loaded</span>
+  </div>
+
+  <div class="panels">
+    <div class="panel">
+      <h2>Reference</h2>
+      <div class="imgbox" id="refBox"><span>No image</span></div>
+      <div class="path" id="refPath"></div>
+      <label class="filebtn">
+        <button type="button" onclick="this.parentElement.querySelector('input').click()">Choose reference image</button>
+        <input type="file" accept="image/*" id="refInput" />
+      </label>
+    </div>
+    <div class="panel">
+      <h2>Distorted <span id="distCount" style="color:#888;font-weight:400"></span></h2>
+      <ul class="distlist" id="distList"><li><span class="fname" style="color:#888">No images selected</span></li></ul>
+      <label class="filebtn">
+        <button type="button" onclick="this.parentElement.querySelector('input').click()">Choose distorted image(s)</button>
+        <input type="file" accept="image/*" id="distInput" multiple />
+      </label>
+    </div>
+  </div>
+
+  <div class="scorebar">
+    <button id="runBtn" disabled>Compute scores</button>
+    <button id="csvBtn" disabled>Export CSV</button>
+    <span id="status" style="margin-left:auto"></span>
+  </div>
+
+  <div id="results"></div>
+
+<script>
+"use strict";
+
+// Pin the WASM backend explicitly — it has full op coverage (MobileNetV3 uses
+// HardSwish / HardSigmoid, which the WebGL/WebGPU backends may not support).
+ort.env.wasm.numThreads = 1; // safest default; raise if cross-origin isolation is set up.
+
+let session = null;
+let inputNames = null;     // discovered from the loaded model
+let refImg = null;         // single reference <img>
+let refName = "";          // reference filename
+let distItems = [];        // [{ name, img }]
+let results = [];          // [{ reference, distorted, score, error }]
+
+const $ = (id) => document.getElementById(id);
+
+function setStatus(msg) { $("status").textContent = msg || ""; }
+
+function maybeEnableRun() {
+  $("runBtn").disabled = !(session && refImg && distItems.length > 0);
+}
+
+// ---- model loading ----
+$("modelInput").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  setStatus("Loading model…");
+  try {
+    const buf = await file.arrayBuffer();
+    session = await ort.InferenceSession.create(buf, { executionProviders: ["wasm"] });
+    inputNames = session.inputNames; // e.g. ["dist", "ref"]
+    if (inputNames.length !== 2) {
+      throw new Error("Expected a 2-input model (dist, ref); got: " + inputNames.join(", "));
+    }
+    $("modelLabel").textContent = file.name + "  (inputs: " + inputNames.join(", ") + ")";
+    $("modelLabel").style.color = "";
+    setStatus("Model loaded.");
+  } catch (err) {
+    session = null;
+    $("modelLabel").textContent = "Load failed";
+    alert("Model load failed:\n" + err.message);
+    setStatus("");
+  }
+  maybeEnableRun();
+});
+
+// ---- reference image (single, with preview) ----
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Could not load image: " + file.name));
+    img.src = url;
+  });
+}
+
+$("refInput").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    const img = await loadImage(file);
+    const box = $("refBox");
+    box.innerHTML = "";
+    box.appendChild(img.cloneNode());
+    $("refPath").textContent = file.name + "  (" + img.naturalWidth + "×" + img.naturalHeight + ")";
+    refImg = img;
+    refName = file.name;
+  } catch (err) {
+    alert(err.message);
+  }
+  maybeEnableRun();
+});
+
+// ---- distorted images (multiple, NO previews) ----
+$("distInput").addEventListener("change", async (e) => {
+  const files = Array.from(e.target.files || []);
+  if (files.length === 0) return;
+  distItems = [];
+  const listEl = $("distList");
+  listEl.innerHTML = "";
+  for (const file of files) {
+    try {
+      const img = await loadImage(file);
+      distItems.push({ name: file.name, img });
+      const li = document.createElement("li");
+      li.innerHTML = '<span class="fname"></span><span class="sc">—</span>';
+      li.querySelector(".fname").textContent =
+        file.name + "  (" + img.naturalWidth + "×" + img.naturalHeight + ")";
+      listEl.appendChild(li);
+    } catch (err) {
+      const li = document.createElement("li");
+      li.innerHTML = '<span class="fname"></span><span class="sc err">load failed</span>';
+      li.querySelector(".fname").textContent = file.name;
+      listEl.appendChild(li);
+    }
+  }
+  $("distCount").textContent = distItems.length ? "(" + distItems.length + ")" : "";
+  $("results").innerHTML = "";
+  $("csvBtn").disabled = true;
+  results = [];
+  maybeEnableRun();
+});
+
+// ---- preprocessing: <img> -> Float32 CHW tensor in [0,1], RGB ----
+function imageToTensor(img) {
+  const w = img.naturalWidth, h = img.naturalHeight;
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0);
+  const { data } = ctx.getImageData(0, 0, w, h); // RGBA, row-major, uint8
+
+  const chw = new Float32Array(3 * h * w);
+  const plane = h * w;
+  for (let p = 0, px = 0; p < plane; p++, px += 4) {
+    chw[p]             = data[px]     / 255; // R
+    chw[p + plane]     = data[px + 1] / 255; // G
+    chw[p + 2 * plane] = data[px + 2] / 255; // B
+  }
+  return new ort.Tensor("float32", chw, [1, 3, h, w]);
+}
+
+// ---- run: score every distorted image against the reference ----
+$("runBtn").addEventListener("click", async () => {
+  if (!(session && refImg && distItems.length)) return;
+  $("runBtn").disabled = true;
+  $("csvBtn").disabled = true;
+  results = [];
+
+  // Reference is preprocessed once and reused for every pair.
+  const refT = imageToTensor(refImg);
+  const listLis = $("distList").querySelectorAll("li");
+
+  for (let i = 0; i < distItems.length; i++) {
+    const { name, img } = distItems[i];
+    setStatus("Scoring " + (i + 1) + " / " + distItems.length + "…");
+    // Yield so the UI updates between images.
+    await new Promise((r) => setTimeout(r, 0));
+    const scEl = listLis[i] ? listLis[i].querySelector(".sc") : null;
+    try {
+      const distT = imageToTensor(img);
+      const feeds = {};
+      feeds[inputNames[0]] = distT;  // first input = dist (matches export order)
+      feeds[inputNames[1]] = refT;   // second input = ref
+      const out = await session.run(feeds);
+      const score = out[session.outputNames[0]].data[0];
+      results.push({ reference: refName, distorted: name, score, error: "" });
+      if (scEl) { scEl.textContent = score.toFixed(4); scEl.classList.remove("err"); }
+    } catch (err) {
+      results.push({ reference: refName, distorted: name, score: null, error: err.message });
+      if (scEl) { scEl.textContent = "error"; scEl.classList.add("err"); }
+    }
+  }
+
+  renderResults();
+  setStatus("Done — " + results.length + " pair(s) scored.");
+  $("runBtn").disabled = false;
+  $("csvBtn").disabled = results.length === 0;
+});
+
+function renderResults() {
+  const div = $("results");
+  if (!results.length) { div.innerHTML = ""; return; }
+  let html = "<table><thead><tr><th>#</th><th>Reference</th><th>Distorted</th><th>Score</th></tr></thead><tbody>";
+  results.forEach((r, i) => {
+    const cell = r.error ? '<span style="color:#c0392b">error</span>' : r.score.toFixed(4);
+    html += "<tr><td>" + (i + 1) + "</td><td>" + esc(r.reference) +
+            "</td><td>" + esc(r.distorted) + "</td><td class='score'>" + cell + "</td></tr>";
+  });
+  html += "</tbody></table>";
+  div.innerHTML = html;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+// ---- CSV export ----
+function csvField(s) {
+  s = String(s);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+$("csvBtn").addEventListener("click", () => {
+  if (!results.length) return;
+  const lines = ["reference,distorted,score,error"];
+  for (const r of results) {
+    lines.push([
+      csvField(r.reference),
+      csvField(r.distorted),
+      r.error ? "" : r.score,
+      csvField(r.error),
+    ].join(","));
+  }
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "iqa_scores.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+});
+</script>
+
+<!--
+  IMPORTANT: input order.
+  The export names the model inputs ["dist", "ref"] in that order, and the
+  model's forward is forward(dist, ref). This page feeds inputNames[0]=dist,
+  inputNames[1]=ref accordingly. If you re-export with a different input order,
+  fix the feeds mapping above.
+
+  OFFLINE USE:
+  This page pulls onnxruntime-web from a CDN. To run with no internet:
+    1. Download these files from https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/
+       into a folder next to this HTML:
+         ort.min.js, ort-wasm-simd-threaded.wasm (and any other *.wasm it requests)
+    2. Change the <script src> above to "./ort.min.js".
+    3. Tell ORT where the wasm lives, before creating the session:
+         ort.env.wasm.wasmPaths = "./";
+    Then the whole thing runs from a local folder with zero network access.
+-->
+</body>
+</html>
